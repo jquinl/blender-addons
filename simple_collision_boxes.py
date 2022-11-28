@@ -3,7 +3,7 @@ import bpy
 bl_info = {
 	"name": "Create simple collision mesh",
 	"author": "Jon Eunan Quinlivan Domínguez",
-	"version": (0, 1),
+	"version": (1, 0),
 	"blender": (3, 3, 1),
 	"location": "View3D > Add > Mesh > Create Collision Mesh",
 	"description" : "Create simplified meshes for collision meshes using vertex bounding boxes",
@@ -483,7 +483,7 @@ class OBJECT_OT_create_collision(Operator):
 def add_object_button(self, context):
 		self.layout.operator(
             OBJECT_OT_create_collision.bl_idname,
-            text= "Create BB Collision",
+            text= "Create Collision Mesh",
             icon="CLIPUV_HLT")
 
 def register():
