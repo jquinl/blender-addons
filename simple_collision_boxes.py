@@ -3,7 +3,7 @@ import bpy
 bl_info = {
 	"name": "Create simple collision mesh",
 	"author": "Jon Eunan Quinlivan Domínguez",
-	"version": (1, 0),
+	"version": (1, 1),
 	"blender": (3, 3, 1),
 	"location": "View3D > Add > Mesh > Create Collision Mesh",
 	"description" : "Create simplified meshes for collision meshes using vertex bounding boxes",
@@ -22,6 +22,22 @@ class OBJECT_OT_create_collision(Operator):
     bl_label = "Create Simplified Collision Mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
+    mode : EnumProperty(
+        name='Mode',
+        description="Collision Generation Mode",
+        items=[
+            ("BOUND", "Bounding Box", ""),
+            ("DECIM", "Decimate", ""),
+            ],
+        default="BOUND"
+    )
+
+    decimate_rat : FloatProperty(
+        name='Decimate Ratio',
+        description="Collapse decimate ratio",
+        min=0.0, max=1.0,
+        default=0.5,
+    )
     axis : EnumProperty(
         name='Axis',
         description="Subdivide along Axis",
@@ -34,7 +50,7 @@ class OBJECT_OT_create_collision(Operator):
     )
 
     subdiv_type : EnumProperty(
-        name='Mode',
+        name='Type',
         description="Mode of subdivision applied",
         items=[
             ("DIV", "By Subdivsion Number", ""),
@@ -108,29 +124,38 @@ class OBJECT_OT_create_collision(Operator):
         layout = self.layout
 
         row = layout.row(align=True)
-        row.prop(self, 'axis')
-        row = layout.row(align=True)
-        row.prop(self, 'subdiv_type')
-        row = layout.row(align=True)
-        if(self.subdiv_type == "DIV"):
+        row.prop(self, 'mode')
+        if(self.mode == "BOUND"):
             row = layout.row(align=True)
-            row.prop(self, 'div')
-        if(self.subdiv_type == "CHK"):
+            row.prop(self, 'axis')
             row = layout.row(align=True)
-            row.prop(self, 'chk')
+            row.prop(self, 'subdiv_type')
+            row = layout.row(align=True)
+            if(self.subdiv_type == "DIV"):
+                row = layout.row(align=True)
+                row.prop(self, 'div')
+            if(self.subdiv_type == "CHK"):
+                row = layout.row(align=True)
+                row.prop(self, 'chk')
 
-        row = layout.row(align=True)
-        row.prop(self,'offset')
-        row = layout.row(align=True)
-        row.prop(self,'collapse')
-        row = layout.row(align=True)
-        row.prop(self,'force_vol')
-        row = layout.row(align=True)
-        row.prop(self,'shared_mesh')
+            row = layout.row(align=True)
+            row.prop(self,'offset')
+            row = layout.row(align=True)
+            row.prop(self,'collapse')
+            row = layout.row(align=True)
+            row.prop(self,'force_vol')
+            row = layout.row(align=True)
+            row.prop(self,'shared_mesh')
+
+        elif(self.mode == "DECIM"):
+            row = layout.row(align=True)
+            row.prop(self, 'decimate_rat')
+
         row = layout.row(align=True)
         row.prop(self,'parent')
         row = layout.row(align=True)
         row.prop(self,'suffix')
+        
 
     def genereate_bb_col(self, context):
 
@@ -139,33 +164,64 @@ class OBJECT_OT_create_collision(Operator):
         edges=[]
         bb_verts = []
         faces = []
-        for ct,m_object in enumerate(selection):
 
+        active_object = bpy.context.view_layer.objects.active
+        if(active_object is not None):
+            if(self.subdiv_type == "DIV"):
+                bb_verts = self.divide_mesh_by_div(context,active_object.data.vertices)
+            elif(self.subdiv_type == "CHK"):
+                bb_verts = self.divide_mesh_by_chk(context,active_object.data.vertices)
+
+            if(self.collapse != "NON"):
+                bb_verts = self.collapse_bb(context,bb_verts)
+
+            if(len(bb_verts)>7):
+                faces = self.make_faces(context,bb_verts)
+
+        for ct,m_object in enumerate(selection):
 
             bb_mesh = bpy.data.meshes.new(name=m_object.name + "_colmesh")
 
-            if(not self.shared_mesh or ct == 0):
-                if(self.subdiv_type == "DIV"):
-                    bb_verts = self.divide_mesh_by_div(context,m_object.data.vertices)
-                elif(self.subdiv_type == "CHK"):
-                    bb_verts = self.divide_mesh_by_chk(context,m_object.data.vertices)
+            if(self.mode == "BOUND"):
+                if(not self.shared_mesh or active_object is None):
+                    if(self.subdiv_type == "DIV"):
+                        bb_verts = self.divide_mesh_by_div(context,m_object.data.vertices)
+                    elif(self.subdiv_type == "CHK"):
+                        bb_verts = self.divide_mesh_by_chk(context,m_object.data.vertices)
 
-                if(self.collapse != "NON"):
-                    bb_verts = self.collapse_bb(context,bb_verts)
+                    if(self.collapse != "NON"):
+                        bb_verts = self.collapse_bb(context,bb_verts)
 
-                if(len(bb_verts)>7):
-                    faces = self.make_faces(context,bb_verts)
+                    if(len(bb_verts)>7):
+                        faces = self.make_faces(context,bb_verts)
 
-            bb_mesh.from_pydata(bb_verts, edges, faces)
-            bb_mesh.update()
-           
-            obj_name = m_object.name + self.suffix
-            bb_object=bpy.data.objects.new(obj_name, bb_mesh)
+                bb_mesh.from_pydata(bb_verts, edges, faces)
+                bb_mesh.update()
+            
+                obj_name = m_object.name + self.suffix
+                bb_object=bpy.data.objects.new(obj_name, bb_mesh)
 
-            bpy.context.collection.objects.link(bb_object)
+                bpy.context.collection.objects.link(bb_object)
+                if(self.parent):
+                    bb_object.parent=m_object
 
-            if(self.parent):
-                bb_object.parent=m_object
+            elif(self.mode == "DECIM"):
+                obj_name = m_object.name + self.suffix
+                modifier_name = m_object.name + "decim"
+
+                bb_object = m_object.copy()
+                bb_object.data = m_object.data.copy()
+                bb_object.name = obj_name
+
+                bpy.context.collection.objects.link(bb_object)
+
+                modifier = bb_object.modifiers.new(modifier_name,'DECIMATE')
+                modifier.ratio = self.decimate_rat
+                modifier.use_collapse_triangulate = True
+                bpy.ops.object.modifier_apply( modifier=modifier_name)
+
+                if(self.parent):
+                    bb_object.parent=m_object
 
     def divide_mesh_by_div(self,context,vertices):
 
