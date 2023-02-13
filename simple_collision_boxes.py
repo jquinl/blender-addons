@@ -1,9 +1,7 @@
-import bpy
-
 bl_info = {
 	"name": "Create simple collision mesh",
 	"author": "Jon Eunan Quinlivan Domínguez",
-	"version": (1, 1),
+	"version": (1, 2),
 	"blender": (3, 3, 1),
 	"location": "View3D > Add > Mesh > Create Collision Mesh",
 	"description" : "Create simplified meshes for collision meshes using vertex bounding boxes",
@@ -13,6 +11,10 @@ bl_info = {
 }
 
 import bpy
+import math
+import bmesh
+import numpy as np
+from mathutils import Matrix
 from bpy.types import Operator
 from bpy_extras.object_utils import AddObjectHelper
 from bpy.props import FloatProperty, IntProperty, EnumProperty, BoolProperty, StringProperty
@@ -45,8 +47,14 @@ class OBJECT_OT_create_collision(Operator):
             ("X_AXIS", "X axis", ""),
             ("Y_AXIS", "Y axis", ""),
             ("Z_AXIS", "Z axis", ""),
+            ("MIN_AXIS","Minimal","")
             ],
         default="X_AXIS"
+    )
+    covex_mesh : BoolProperty(
+        name='Force Convex',
+        description="Will ensure mesh is convex",
+        default=False,
     )
 
     subdiv_type : EnumProperty(
@@ -128,24 +136,28 @@ class OBJECT_OT_create_collision(Operator):
         if(self.mode == "BOUND"):
             row = layout.row(align=True)
             row.prop(self, 'axis')
-            row = layout.row(align=True)
-            row.prop(self, 'subdiv_type')
-            row = layout.row(align=True)
-            if(self.subdiv_type == "DIV"):
+            if(self.axis != "MIN_AXIS"):
                 row = layout.row(align=True)
-                row.prop(self, 'div')
-            if(self.subdiv_type == "CHK"):
+                row.prop(self, 'subdiv_type')
                 row = layout.row(align=True)
-                row.prop(self, 'chk')
+                if(self.subdiv_type == "DIV"):
+                    row = layout.row(align=True)
+                    row.prop(self, 'div')
+                if(self.subdiv_type == "CHK"):
+                    row = layout.row(align=True)
+                    row.prop(self, 'chk')
 
-            row = layout.row(align=True)
-            row.prop(self,'offset')
-            row = layout.row(align=True)
-            row.prop(self,'collapse')
-            row = layout.row(align=True)
-            row.prop(self,'force_vol')
-            row = layout.row(align=True)
-            row.prop(self,'shared_mesh')
+                row = layout.row(align=True)
+                row.prop(self,'offset')
+                row = layout.row(align=True)
+                row.prop(self,'collapse')
+                row = layout.row(align=True)
+                row.prop(self,'force_vol')
+                row = layout.row(align=True)
+                row.prop(self,'covex_mesh')
+
+                row = layout.row(align=True)
+                row.prop(self,'shared_mesh')
 
         elif(self.mode == "DECIM"):
             row = layout.row(align=True)
@@ -183,21 +195,86 @@ class OBJECT_OT_create_collision(Operator):
             bb_mesh = bpy.data.meshes.new(name=m_object.name + "_colmesh")
 
             if(self.mode == "BOUND"):
-                if(not self.shared_mesh or active_object is None):
-                    if(self.subdiv_type == "DIV"):
-                        bb_verts = self.divide_mesh_by_div(context,m_object.data.vertices)
-                    elif(self.subdiv_type == "CHK"):
-                        bb_verts = self.divide_mesh_by_chk(context,m_object.data.vertices)
+                if(self.axis == "MIN_AXIS"):
+                    bm = bmesh.new()
+                    bm.from_mesh(m_object.to_mesh())
+                    bem = bmesh.ops.convex_hull(bm,input=bm.verts,use_existing_faces=False)
+                    bem_geom = bem["geom"]
+                    bem_pts = np.array([bmelem.co for bmelem in bem_geom if isinstance(bmelem, bmesh.types.BMVert)])
 
-                    if(self.collapse != "NON"):
-                        bb_verts = self.collapse_bb(context,bb_verts)
+                    bases = []
+                    for elem in bem_geom:
+                        if not isinstance(elem, bmesh.types.BMFace):
+                            continue
+                        if len(elem.verts) != 3:
+                            continue
 
-                    if(len(bb_verts)>7):
-                        faces = self.make_faces(context,bb_verts)
+                        face_normal = elem.normal
+                        if np.allclose(face_normal, 0, atol=0.00001):
+                            continue
 
-                bb_mesh.from_pydata(bb_verts, edges, faces)
-                bb_mesh.update()
-            
+                        for e in elem.edges:
+                            v0, v1 = e.verts
+                            edge_vec = (v0.co - v1.co).normalized()
+                            co_tangent = face_normal.cross(edge_vec)
+                            basis = (edge_vec, co_tangent, face_normal)
+                            bases.append(basis)
+
+                    min_bb_basis,min_bb_max,min_bb_min = self.rotating_calipers(bem_pts,bases)
+
+                    bb_basis = np.array(min_bb_basis)
+                    bb_basis_mat = bb_basis.T
+                    bb_dim = min_bb_max - min_bb_min
+                    bb_center = (min_bb_max + min_bb_min ) / 2
+                    mat = Matrix.Translation(bb_center.dot(bb_basis)) @ Matrix(bb_basis_mat).to_4x4() @ Matrix(np.identity(3) * bb_dim / 2).to_4x4()
+
+                    vertices = [[-1,-1,-1],
+                                [-1,-1,1],
+                                [-1,1,-1],
+                                [-1,1,1],
+                                [1,-1,-1],
+                                [1,-1,1],
+                                [1,1,-1],
+                                [1,1,1]]
+
+                    CUBE_INDICES = (
+                        (0, 1, 3, 2),
+                        (2, 3, 7, 6),
+                        (6, 7, 5, 4),
+                        (4, 5, 1, 0),
+                        (2, 6, 4, 0),
+                        (7, 3, 1, 5),
+                    )
+                    bb_mesh.from_pydata(vertices=vertices, edges=[], faces=CUBE_INDICES)
+                    bb_mesh.validate()
+                    bb_mesh.transform(mat)
+                    bb_mesh.update()
+                else:
+                    if(not self.shared_mesh or active_object is None):
+                        if(self.subdiv_type == "DIV"):
+                            bb_verts = self.divide_mesh_by_div(context,m_object.data.vertices)
+                        elif(self.subdiv_type == "CHK"):
+                            bb_verts = self.divide_mesh_by_chk(context,m_object.data.vertices)
+
+                        if(self.collapse != "NON"):
+                            bb_verts = self.collapse_bb(context,bb_verts)
+
+                        if(len(bb_verts)>7):
+                            faces = self.make_faces(context,bb_verts)
+
+                    bb_mesh.from_pydata(bb_verts, edges, faces)
+                    bb_mesh.update()
+                    if(self.covex_mesh):
+                        bm = bmesh.new()
+                        bm.from_mesh(bb_mesh)
+                        bem = bmesh.ops.convex_hull(bm,input=bm.verts,use_existing_faces=False)
+                        bem_geom = bem["geom"]
+                        for face in set(bm.faces) - set(bem_geom):
+                            bm.faces.remove(face)
+                        for edge in set(bm.edges) - set(bem_geom):
+                            bm.edges.remove(edge)
+                        bm.to_mesh(bb_mesh)
+
                 obj_name = m_object.name + self.suffix
                 bb_object=bpy.data.objects.new(obj_name, bb_mesh)
 
@@ -275,6 +352,7 @@ class OBJECT_OT_create_collision(Operator):
                     bb_v = self.bounding_box_verts(context,verts)
 
                     full_bb_verts.extend(bb_v)
+
 
         return full_bb_verts 
 
@@ -535,6 +613,26 @@ class OBJECT_OT_create_collision(Operator):
                 (minX,maxY,maxZ),
                 ]
         return bb_verts
+
+    def rotating_calipers(self, verts:np.ndarray ,bases):
+        min_bb_basis = None
+        min_bb_min = None
+        min_bb_max = None
+        min_vol = math.inf
+        for basis in bases:
+            rot_points =  verts.dot(np.linalg.inv(basis))
+
+            bb_min = rot_points.min(axis=0)
+            bb_max = rot_points.max(axis=0)
+            volume = (bb_max - bb_min).prod()
+            if volume < min_vol:
+                min_bb_basis = basis
+                min_vol = volume
+
+                min_bb_min = bb_min
+                min_bb_max = bb_max
+
+        return np.array(min_bb_basis),min_bb_max,min_bb_min
 
 def add_object_button(self, context):
 		self.layout.operator(
